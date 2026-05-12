@@ -10,3 +10,13 @@
 
 #python3 main.py
 
+## Description
+
+This is a Python-based Website Scanner Tool used for website reconnaissance, scanning, and information gathering.
+
+## Requirements
+
+- Python 3
+- Git
+- Internet Connection
+
