@@ -1,7 +1,6 @@
 """
-Web Security Scanner Engine — IMPROVED DETECTION
-SQL Injection, XSS, CSRF detection with automated crawling
-Specifically hardened for real-world vulnerability detection
+Web Security Scanner Engine — OPTIMIZED with Full Page Details
+SQL Injection, XSS, CSRF detection with performance tuning
 """
 
 import requests
@@ -10,10 +9,11 @@ from urllib.parse import urljoin, urlparse, parse_qs, urlencode
 import re
 import time
 import json
-from typing import List, Dict, Set, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict, Set, Optional, Tuple, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from colorama import Fore, Style, init
 from dataclasses import dataclass, field, asdict
+import datetime
 
 init(autoreset=True)
 
@@ -31,12 +31,41 @@ class Vulnerability:
 
 
 @dataclass
+class PageInfo:
+    """Detailed information about a crawled page."""
+    url: str
+    title: str = ""
+    status_code: int = 0
+    content_type: str = ""
+    content_length: int = 0
+    forms: List[Dict] = field(default_factory=list)
+    internal_links: List[str] = field(default_factory=list)
+    external_links: List[str] = field(default_factory=list)
+    parameters: List[str] = field(default_factory=list)
+    scripts: List[str] = field(default_factory=list)
+    tech_stack: List[str] = field(default_factory=list)  # Detected technologies
+
+
+@dataclass
+class FormDetail:
+    """Detailed form information."""
+    page_url: str
+    action_url: str
+    method: str
+    inputs: List[Dict] = field(default_factory=list)
+    has_csrf_token: bool = False
+    detected_csrf_field: str = ""
+
+
+@dataclass
 class ScanResult:
     target_url: str
     scan_date: str
     total_urls_scanned: int
     total_forms_found: int
     vulnerabilities: List[Vulnerability] = field(default_factory=list)
+    pages: List[PageInfo] = field(default_factory=list)  # All page details
+    forms: List[FormDetail] = field(default_factory=list)  # All form details
     scan_duration_seconds: float = 0.0
 
     def to_dict(self) -> dict:
@@ -46,232 +75,106 @@ class ScanResult:
             "total_urls_scanned": self.total_urls_scanned,
             "total_forms_found": self.total_forms_found,
             "vulnerabilities": [asdict(v) for v in self.vulnerabilities],
+            "pages": [asdict(p) for p in self.pages],
+            "forms": [asdict(f) for f in self.forms],
             "scan_duration_seconds": self.scan_duration_seconds,
         }
 
 
 class WebScanner:
-    """Improved web security scanner with real-world detection."""
+    """Optimized web security scanner with full page/form details."""
 
-    # ===== SQL INJECTION ERROR PATTERNS (EXPANDED) =====
+    # ===== SQL INJECTION ERROR PATTERNS (TIGHTENED) =====
     SQL_ERROR_PATTERNS = [
-        # MySQL
-        r"SQL syntax.*MySQL",
-        r"Warning.*mysql_",
-        r"MySQLSyntaxErrorException",
-        r"valid MySQL result",
-        r"check the manual that corresponds to your (MySQL|MariaDB) server",
-        r"Unknown column.*in 'field list'",
-        r"Duplicate entry.*for key",
+        r"Syntax error or access violation.*\d{5}",
         r"Table '.*?' doesn't exist",
-        r"Column count doesn't match",
-        r"#1",
-        r"#1064",
-        r"#1146",
-        r"#1054",
-        r"#1062",
-        r"#1366",
-        r"#2002",
-        r"You have an error in your SQL syntax",
-        # MariaDB specific
-        r"MariaDB server version",
-        # PostgreSQL
-        r"PostgreSQL.*ERROR",
-        r"Warning.*\Wpg_",
-        r"valid PostgreSQL result",
-        r"PG::SyntaxError",
-        r"ERROR:\s+syntax error at or near",
-        r"ERROR:\s+relation.*does not exist",
-        r"ERROR:\s+column.*does not exist",
-        r"ERROR:\s+function.*does not exist",
-        # Oracle
-        r"ORA-[0-9]{5}",
-        r"Oracle.*Driver",
-        r"Oracle.*error",
-        r"Oracle.*ORA",
-        r"PL/SQL.*error",
-        # MSSQL
-        r"Microsoft.*ODBC.*SQL Server",
-        r"Driver.*SQL Server",
-        r"SQL Server.*Driver",
-        r"Unclosed quotation mark",
-        r"Microsoft OLE DB.*SQL",
-        r"Microsoft SQL Server.*error",
-        r"Incorrect syntax near",
-        r"Line \d+",
-        r"Msg \d+, Level \d+",
-        # SQLite
-        r"SQLite/JDBCDriver",
-        r"SQLite\.Exception",
-        r"System\.Data\.SQLite\.SQLiteException",
-        r"SQLite3::",
-        r"Warning.*sqlite_",
-        r"valid SQLite",
-        r"not unique",
-        r"UNIQUE constraint failed",
-        # Generic
-        r"unclosed quotation mark",
-        r"quoted string not properly terminated",
-        r"SQL command not properly ended",
-        r"Syntax error in string in query",
-        r"Divide by zero.*SQL",
-        r"Uncaught.*QueryException",
-        r"SQLSTATE\[",
-        r"PDOException",
-        r"mysql_fetch_",
-        r"mysql_num_rows",
-        r"mysql_error",
-        r"mysqli_fetch_",
-        r"mysqli_error",
-        r"supplied argument is not a valid MySQL",
-        r"Warning:.*\bdb2_\b",
-        r"Warning:.*\boci_\b",
-        r"Warning:.*\bodbc_\b",
-        r"Warning:.*\bsqlsrv_\b",
-        r"\[SQL Server\]",
-        r"\[Oracle\]",
-        r"\[MySQL\]",
-        r"\[ODBC",
-        r"\[Microsoft\]",
-        r"\[IBM\]",
-        r"SQL.+\berror\b",
-        r"Error Occurred While Processing Request",
-        r"Error Executing Database Query",
+        r"Unknown column '.*?' in 'field list'",
+        r"You have an error in your SQL syntax.*near",
+        r"Column count doesn't match value count",
+        r"Duplicate entry '.*?' for key",
+        r"SQLSTATE\[42000\]",
+        r"SQLSTATE\[23000\]",
+        r"SQLSTATE\[42S02\]",
+        r"Uncaught.*PDOException.*SQL",
+        r"Uncaught.*mysqli_sql_exception",
+        r"Unclosed quotation mark after the character string",
+        r"Incorrect syntax near '",
+        r"Msg \d+, Level \d+, State \d+",
+        r"ERROR:\s+relation\s+\".*?\"\s+does not exist",
+        r"ERROR:\s+column\s+\".*?\"\s+does not exist",
+        r"ORA-\d{5}:",
+        r"supplied argument is not a valid MySQL result resource",
+        r"mysql_fetch_array\(\): supplied argument is not a valid",
+        r"Division by zero in.*SQL",
     ]
 
-    # ===== SQL INJECTION PAYLOADS (HARDENED) =====
+    # ===== SQL INJECTION PAYLOADS (REDUCED, HIGHEST YIELD) =====
     SQLI_PAYLOADS = [
-        # Basic
         "'",
-        "\"",
-        # Boolean-based
         "' OR '1'='1",
-        "' OR '1'='1' --",
-        "' OR '1'='1' #",
         "' OR 1=1 --",
-        "' OR 1=1 #",
-        "' OR 1=1 -- -",
-        "1' OR '1'='1",
-        "1' AND 1=1 --",
-        "' OR 1=1 --+",
-        "' OR 1=1 LIMIT 1 --",
-        "' OR '1'='1' LIMIT 1 --",
-        # Admin bypass
-        "admin' --",
-        "admin' #",
-        "admin'/*",
-        "admin' OR '1'='1",
-        "' OR 1=1 -- admin",
-        # UNION based
         "' UNION SELECT NULL--",
-        "' UNION SELECT NULL,NULL--",
-        "' UNION SELECT NULL,NULL,NULL--",
-        "' UNION SELECT 1,2,3--",
-        "' UNION SELECT 1,2,3,4--",
-        "' UNION ALL SELECT NULL--",
-        "' UNION ALL SELECT 1,2--",
-        # String variations
-        "' OR '1'='1",
-        "' OR '1'='2",
-        "' AND '1'='1",
-        "' AND '1'='2",
-        "\" OR \"1\"=\"1",
-        "\" OR \"1\"=\"2",
-        "\" AND \"1\"=\"1",
-        "\" AND \"1\"=\"2",
-        # Comment variations
-        "') OR ('1'='1",
-        "')) OR (('1'='1",
-        "1' OR 1=1 /*",
-        "' OR 1=1 /*",
-        # Time-based (sleep)
-        "' OR SLEEP(5)--",
-        "' OR SLEEP(5)#",
-        "1' OR SLEEP(5)--",
-        "' OR SLEEP(3) OR '1'='1",
-        "1' AND SLEEP(5)--",
-        "'; WAITFOR DELAY '0:0:5'--",
-        "' OR pg_sleep(5)--",
-        "1' OR pg_sleep(5)--",
-        # Numeric
-        "1 OR 1=1",
-        "1 AND 1=1",
-        "1 AND 1=2",
-        # Double query injection
-        "'+(select*from(select(sleep(5)))a)+'",
-        "'+SLEEP(5)+'",
-        # No quotes needed
-        "OR 1=1",
-        "OR 1=1--",
-        "OR 1=1#",
-        "|| 1=1",
-        "|| 1=1--",
+        "' AND 1=1 --",
+        "1' AND '1'='1",
+        '" OR "1"="1',
+        "' OR SLEEP(3)--",
     ]
 
-    # ===== XSS PAYLOADS (POLYGLOT & EVASION) =====
+    # ===== XSS PAYLOADS (REDUCED, HIGH COVERAGE) =====
     XSS_PAYLOADS = [
-        # Basic script
         "<script>alert(1)</script>",
-        "<script>alert('XSS')</script>",
-        # Image onerror
         "<img src=x onerror=alert(1)>",
-        "<img src=x onerror=alert(1)>",
-        "<img src=x onerror=alert(document.cookie)>",
-        # SVG
         "<svg onload=alert(1)>",
-        "<svg onload=alert(1)//",
-        # Body
         "<body onload=alert(1)>",
-        # Input
         "<input onfocus=alert(1) autofocus>",
-        # Detail/open
         "<details open ontoggle=alert(1)>",
-        # Audio/video
-        "<audio src=x onerror=alert(1)>",
-        "<video src=x onerror=alert(1)>",
-        # Iframe
-        "<iframe srcdoc='<script>alert(1)</script>'></iframe>",
-        # Event handlers
-        "<div onmouseover=alert(1)>test</div>",
-        "<div onclick=alert(1)>test</div>",
-        # Encoded/obfuscated
-        "<ScRiPt>alert(1)</ScRiPt>",
-        "<sCrIpT>alert(1)</sCrIpT>",
-        "<SCRIPT>alert(1)</SCRIPT>",
-        # Broken syntax
         "\"><script>alert(1)</script>",
         "'><script>alert(1)</script>",
         "';alert(1);//",
-        "\"><img src=x onerror=alert(1)>",
-        "'><img src=x onerror=alert(1)>",
-        # JavaScript URL
-        "javascript:alert(1)",
-        "\"onmouseover=\"alert(1)",
-        # Attribute-based
         "\" autofocus onfocus=alert(1) x=\"",
-        "' autofocus onfocus=alert(1) x='",
-        # Without parentheses
-        "<script>alert`1`</script>",
-        "<script>confirm`1`</script>",
-        "<script>prompt`1`</script>",
-        # Nested
-        "<img src=x onerror=\"<script>alert(1)</script>\">",
-        # HTML entities (UTF-7/8 bypass attempts)
-        "<img src=x onerror=\u0061lert(1)>",
-        # Self-closing XSS
-        "<script/src=data:,alert(1)></script>",
-        "<script/src=data:;base13,alert(1)></script>",
-        # Polyglot
-        "\"'><img src=x onerror=alert(1)>",
-        "\"'><svg onload=alert(1)>",
+    ]
+
+    # ===== TECHNOLOGY DETECTION PATTERNS =====
+    TECH_PATTERNS = {
+        "PHP": [r"<\?php", r"\.php", r"PHP/[\d.]+", r"X-Powered-By:\s*PHP"],
+        "ASP.NET": [r"__VIEWSTATE", r"__EVENTVALIDATION", r"ASP\.NET", r"X-AspNet-Version"],
+        "Java": [r"javax\.faces", r"JSF", r"\.jsp", r"X-Powered-By:\s*Servlet"],
+        "WordPress": [r"wp-content", r"wp-includes", r"wp-admin", r"WordPress"],
+        "Drupal": [r"Drupal\.", r"drupal", r"sites/default/files"],
+        "Joomla": [r"com_content", r"option=com_", r"/components/com_"],
+        "Laravel": [r"laravel", r"CSRF-TOKEN", r"XSRF-TOKEN"],
+        "Django": [r"csrfmiddlewaretoken", r"__csrf", r"Django"],
+        "Ruby on Rails": [r"authenticity_token", r"rails", r"Rails"],
+        "Express/Node": [r"X-Powered-By:\s*Express", r"node_modules"],
+        "jQuery": [r"jquery", r"jQuery", r"\$\.ajax"],
+        "React": [r"react", r"ReactDOM", r"createElement"],
+        "Angular": [r"ng-app", r"angular", r"ng-model"],
+        "Bootstrap": [r"bootstrap", r"Bootstrap"],
+    }
+
+    # ===== SKIP THESE TRACKING PARAMS =====
+    SKIP_PARAMS = {
+        "utm_source", "utm_medium", "utm_campaign", "utm_term",
+        "utm_content", "ref", "source", "source_url", "fbclid",
+        "gclid", "_ga", "icid", "trk", "affiliate", "tap_s",
+        "si", "pk_source", "pk_medium", "pk_campaign",
+    }
+
+    # ===== CSRF FIELD PATTERNS =====
+    CSRF_PATTERNS = [
+        "csrf", "csrf_token", "csrftoken", "csrfmiddlewaretoken",
+        "_csrf", "csrf-token", "__csrf", "xsrf", "_xsrf",
+        "authenticity_token", "_token", "nonce",
+        "__RequestVerificationToken", "_csrf_token",
     ]
 
     def __init__(
         self,
         target_url: str,
         max_depth: int = 2,
-        threads: int = 5,
-        timeout: int = 15,
+        threads: int = 10,
+        timeout: int = 10,
+        skip_time_based: bool = False,
         user_agent: str = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -282,17 +185,19 @@ class WebScanner:
         self.max_depth = max_depth
         self.threads = threads
         self.timeout = timeout
+        self.skip_time_based = skip_time_based
         self.visited_urls: Set[str] = set()
         self.forms_found: List[Dict] = []
         self.vulnerabilities: List[Vulnerability] = []
+        self.pages: List[PageInfo] = []  # Store all page info
+        self.form_details: List[FormDetail] = []  # Store all form details
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": user_agent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
         })
-        self.session.verify = False  # Allow self-signed certs in labs
-        # Suppress SSL warnings
+        self.session.verify = False
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -303,6 +208,7 @@ class WebScanner:
         print(f"{Fore.CYAN}[*] Web Security Scanner initialized")
         print(f"{Fore.CYAN}[*] Target: {target_url}")
         print(f"{Fore.CYAN}[*] Max Depth: {max_depth} | Threads: {threads}")
+        print(f"{Fore.CYAN}[*] Time-based SQLi: {'DISABLED' if skip_time_based else 'ENABLED'}")
         print(f"{Fore.CYAN}[*] Domain scope: {self.target_domain}\n")
 
     def _normalize_url(self, url: str) -> str:
@@ -312,14 +218,99 @@ class WebScanner:
     def _is_in_scope(self, url: str) -> bool:
         try:
             parsed = urlparse(url)
-            # Also allow subdomains of the target
-            return parsed.netloc == self.target_domain or parsed.netloc.endswith("." + self.target_domain) if "." in self.target_domain else parsed.netloc == self.target_domain
+            return parsed.netloc == self.target_domain or \
+                   parsed.netloc.endswith("." + self.target_domain)
         except:
             return False
 
-    def _extract_forms(self, url: str, html: str) -> List[Dict]:
-        """Extract ALL forms including all input types."""
+    def _detect_technologies(self, html: str, headers: Dict) -> List[str]:
+        """Detect technologies used by the target."""
+        tech_stack = set()
+        
+        # Check headers
+        for key, value in headers.items():
+            for tech, patterns in self.TECH_PATTERNS.items():
+                for pattern in patterns:
+                    if pattern.startswith("X-"):
+                        # Header-based detection
+                        try:
+                            if re.search(pattern, f"{key}: {value}", re.IGNORECASE):
+                                tech_stack.add(tech)
+                        except:
+                            pass
+        
+        # Check HTML content
+        for tech, patterns in self.TECH_PATTERNS.items():
+            for pattern in patterns:
+                if not pattern.startswith("X-"):
+                    try:
+                        if re.search(pattern, html, re.IGNORECASE):
+                            tech_stack.add(tech)
+                    except:
+                        pass
+        
+        return list(tech_stack)
+
+    def _extract_page_info(self, url: str, response: requests.Response) -> PageInfo:
+        """Extract comprehensive page information."""
+        html = response.text
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Extract title
+        title = ""
+        title_tag = soup.find("title")
+        if title_tag:
+            title = title_tag.get_text(strip=True)
+        
+        # Extract scripts
+        scripts = []
+        for script in soup.find_all("script"):
+            src = script.get("src", "")
+            if src:
+                scripts.append(urljoin(url, src))
+            elif script.string:
+                # Just note inline script presence
+                scripts.append("INLINE_SCRIPT")
+        
+        # Extract links
+        internal_links = []
+        external_links = []
+        for link in soup.find_all("a", href=True):
+            href = link["href"].strip()
+            full_url = urljoin(url, href)
+            if full_url.startswith(("http://", "https://")):
+                if self._is_in_scope(full_url):
+                    internal_links.append(full_url)
+                else:
+                    external_links.append(full_url)
+        
+        # Extract URL parameters
+        params = []
+        parsed = urlparse(url)
+        if parsed.query:
+            params = list(parse_qs(parsed.query).keys())
+        
+        # Detect technologies
+        tech_stack = self._detect_technologies(html, dict(response.headers))
+        
+        return PageInfo(
+            url=url,
+            title=title,
+            status_code=response.status_code,
+            content_type=response.headers.get("Content-Type", ""),
+            content_length=len(response.content),
+            forms=[],  # Will be populated separately
+            internal_links=internal_links[:50],  # Limit to prevent huge results
+            external_links=external_links[:20],
+            parameters=params,
+            scripts=scripts[:20],
+            tech_stack=tech_stack,
+        )
+
+    def _extract_forms_detailed(self, url: str, html: str) -> Tuple[List[Dict], List[FormDetail]]:
+        """Extract forms with detailed information."""
         forms = []
+        detailed_forms = []
         soup = BeautifulSoup(html, "html.parser")
 
         for form in soup.find_all("form"):
@@ -331,70 +322,80 @@ class WebScanner:
             }
 
             action = form.get("action", "")
-            if action:
-                form_data["action_url"] = urljoin(url, action)
-            else:
-                form_data["action_url"] = url
+            form_data["action_url"] = urljoin(url, action) if action else url
 
-            # Extract ALL input fields including hidden
-            for input_tag in form.find_all(["input", "textarea", "select", "button"]):
-                input_type = input_tag.get("type", "text").lower()
+            for input_tag in form.find_all(["input", "textarea", "select"]):
                 input_name = input_tag.get("name", "")
-
                 if input_name:
-                    form_data["inputs"].append({
+                    input_info = {
                         "name": input_name,
-                        "type": input_type,
+                        "type": input_tag.get("type", "text").lower(),
                         "value": input_tag.get("value", ""),
-                    })
-
-            # If no named inputs found, try to find any input-like fields
-            if not form_data["inputs"]:
-                for input_tag in form.find_all("input"):
-                    name = input_tag.get("name", "")
-                    if name:
-                        form_data["inputs"].append({
-                            "name": name,
-                            "type": input_tag.get("type", "text"),
-                            "value": input_tag.get("value", ""),
-                        })
+                        "placeholder": input_tag.get("placeholder", ""),
+                        "required": input_tag.has_attr("required"),
+                        "maxlength": input_tag.get("maxlength", ""),
+                        "minlength": input_tag.get("minlength", ""),
+                        "pattern": input_tag.get("pattern", ""),
+                    }
+                    form_data["inputs"].append(input_info)
 
             if form_data["inputs"]:
                 forms.append(form_data)
-            else:
-                # Still add forms even without inputs (could be JS-handled)
-                forms.append(form_data)
+                
+                # Check for CSRF tokens
+                has_csrf = False
+                csrf_field = ""
+                for inp in form_data["inputs"]:
+                    name_lower = inp["name"].lower()
+                    for pattern in self.CSRF_PATTERNS:
+                        if pattern in name_lower:
+                            has_csrf = True
+                            csrf_field = inp["name"]
+                            break
+                    if has_csrf:
+                        break
+                
+                detailed_forms.append(FormDetail(
+                    page_url=url,
+                    action_url=form_data["action_url"],
+                    method=form_data["method"],
+                    inputs=form_data["inputs"],
+                    has_csrf_token=has_csrf,
+                    detected_csrf_field=csrf_field,
+                ))
 
-        return forms
+        return forms, detailed_forms
 
-    def _crawl_page(self, url: str, depth: int) -> List[str]:
+    def _crawl_page(self, url: str, depth: int) -> Tuple[List[str], Optional[PageInfo]]:
+        """Crawl and return (new_urls, page_info)."""
         if depth > self.max_depth:
-            return []
+            return [], None
 
         normalized = self._normalize_url(url)
         if normalized in self.visited_urls:
-            return []
+            return [], None
 
         self.visited_urls.add(normalized)
         found_urls = []
+        page_info = None
 
         try:
             print(f"{Fore.BLUE}[*] Crawling: {url} (depth: {depth})")
             response = self.session.get(url, timeout=self.timeout)
-            response.raise_for_status()
-
-            content_type = response.headers.get("Content-Type", "")
-            if "text" not in content_type and "html" not in content_type and "xml" not in content_type:
-                if depth < self.max_depth:
-                    pass  # Still try to parse links
-                else:
-                    return []
-
+            
             html = response.text
-
+            
+            # Extract page info
+            page_info = self._extract_page_info(url, response)
+            
             # Extract forms
-            forms = self._extract_forms(url, html)
+            forms, detailed_forms = self._extract_forms_detailed(url, html)
             self.forms_found.extend(forms)
+            self.form_details.extend(detailed_forms)
+            page_info.forms = forms
+            
+            # Store page info
+            self.pages.append(page_info)
 
             # Extract links
             soup = BeautifulSoup(html, "html.parser")
@@ -407,24 +408,24 @@ class WebScanner:
                         if norm not in self.visited_urls:
                             found_urls.append(full_url)
 
-        except requests.exceptions.RequestException as e:
-            print(f"{Fore.YELLOW}[!] Request failed for {url}: {str(e)[:80]}")
-        except Exception as e:
-            print(f"{Fore.YELLOW}[!] Error crawling {url}: {str(e)[:80]}")
+        except requests.exceptions.RequestException:
+            pass
+        except Exception:
+            pass
 
-        return found_urls
+        return found_urls, page_info
 
     def crawl(self) -> None:
-        """Multi-threaded web crawler."""
+        """Multi-threaded crawl with page info extraction."""
         print(f"{Fore.CYAN}[*] Starting crawl on {self.target_url}")
         to_visit = [(self.target_url, 0)]
         start_time = time.time()
 
         while to_visit:
             batch = []
-            depth = to_visit[0][1] if to_visit else 0
+            current_depth = to_visit[0][1]
 
-            while to_visit and to_visit[0][1] == depth:
+            while to_visit and to_visit[0][1] == current_depth:
                 batch.append(to_visit.pop(0))
                 if len(batch) >= self.threads * 2:
                     break
@@ -436,9 +437,9 @@ class WebScanner:
                 }
                 for future in as_completed(futures):
                     try:
-                        new_urls = future.result()
+                        new_urls, page_info = future.result()
                         for new_url in new_urls:
-                            to_visit.append((new_url, depth + 1))
+                            to_visit.append((new_url, current_depth + 1))
                     except Exception:
                         pass
 
@@ -446,208 +447,57 @@ class WebScanner:
         print(f"\n{Fore.GREEN}[✓] Crawl complete!")
         print(f"{Fore.GREEN}[✓] URLs scanned: {len(self.visited_urls)}")
         print(f"{Fore.GREEN}[✓] Forms found: {len(self.forms_found)}")
+        print(f"{Fore.GREEN}[✓] Pages documented: {len(self.pages)}")
         print(f"{Fore.GREEN}[✓] Time: {elapsed:.2f}s\n")
+
+    def _print_page_summary(self) -> None:
+        """Print a summary of all discovered pages."""
+        print(f"\n{Fore.CYAN}[+] Discovered Pages Summary:")
+        print(f"{'='*60}")
+        
+        for i, page in enumerate(self.pages, 1):
+            print(f"\n{Fore.WHITE}[{i}] {Fore.YELLOW}{page.url}")
+            print(f"    {Fore.CYAN}Title: {Fore.WHITE}{page.title[:80] if page.title else 'N/A'}")
+            print(f"    {Fore.CYAN}Status: {Fore.WHITE}{page.status_code} | "
+                  f"Size: {page.content_length:,} bytes")
+            print(f"    {Fore.CYAN}Forms: {Fore.WHITE}{len(page.forms)} | "
+                  f"Params: {Fore.WHITE}{len(page.parameters)} | "
+                  f"Scripts: {Fore.WHITE}{len(page.scripts)}")
+            if page.tech_stack:
+                print(f"    {Fore.CYAN}Tech: {Fore.WHITE}{', '.join(page.tech_stack)}")
+            if page.parameters:
+                print(f"    {Fore.CYAN}Parameters: {Fore.WHITE}{', '.join(page.parameters[:10])}")
+
+    def _print_form_summary(self) -> None:
+        """Print a summary of all discovered forms."""
+        print(f"\n{Fore.CYAN}[+] Discovered Forms Summary:")
+        print(f"{'='*60}")
+        
+        for i, form in enumerate(self.form_details, 1):
+            print(f"\n{Fore.WHITE}[{i}] Page: {Fore.YELLOW}{form.page_url}")
+            print(f"    {Fore.CYAN}Action: {Fore.WHITE}{form.action_url}")
+            print(f"    {Fore.CYAN}Method: {Fore.WHITE}{form.method.upper()}")
+            print(f"    {Fore.CYAN}Fields ({len(form.inputs)}):")
+            for inp in form.inputs:
+                csrf_tag = f" {Fore.GREEN}[CSRF Token]" if inp["name"] == form.detected_csrf_field else ""
+                required_tag = " *" if inp.get("required") else ""
+                print(f"      - {inp['name']} ({inp['type']}){required_tag}{csrf_tag}")
+            print(f"    {Fore.CYAN}CSRF Protected: {Fore.WHITE}{form.has_csrf_token}")
 
     # ==================== SQL INJECTION DETECTION ====================
 
     def _check_sql_error(self, response_text: str) -> Tuple[bool, str]:
-        """Check if response contains SQL error signatures."""
         for pattern in self.SQL_ERROR_PATTERNS:
             match = re.search(pattern, response_text, re.IGNORECASE)
             if match:
                 return True, match.group()
         return False, ""
 
-    def _test_bool_based_sqli(self, url: str, param: str) -> List[Vulnerability]:
-        """
-        Test for boolean-based blind SQLi by comparing response sizes
-        between true and false conditions.
-        """
-        found = []
-        parsed = urlparse(url)
-        params = parse_qs(parsed.query, keep_blank_values=True)
-
-        if param not in params:
-            return []
-
-        base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        original_value = params[param][0]
-
-        # Get baseline response
-        try:
-            baseline_resp = self.session.get(
-                base_url + "?" + urlencode(params, doseq=True),
-                timeout=self.timeout
-            )
-            baseline_len = len(baseline_resp.text)
-        except:
-            return []
-
-        # Test pairs: true vs false
-        test_pairs = [
-            ("' OR '1'='1", "' OR '1'='2"),
-            ("' AND 1=1 --", "' AND 1=2 --"),
-            ("1' AND '1'='1", "1' AND '1'='2"),
-            ("\" OR \"1\"=\"1", "\" OR \"1\"=\"2"),
-            ("1 AND 1=1", "1 AND 1=2"),
-        ]
-
-        for true_payload, false_payload in test_pairs:
-            try:
-                # True condition
-                true_params = params.copy()
-                true_params[param] = [true_payload]
-                true_resp = self.session.get(
-                    base_url + "?" + urlencode(true_params, doseq=True),
-                    timeout=self.timeout
-                )
-                true_len = len(true_resp.text)
-
-                # False condition
-                false_params = params.copy()
-                false_params[param] = [false_payload]
-                false_resp = self.session.get(
-                    base_url + "?" + urlencode(false_params, doseq=True),
-                    timeout=self.timeout
-                )
-                false_len = len(false_resp.text)
-
-                # Check if they differ significantly (indicating boolean-based SQLi)
-                # Also check if baseline is similar to true condition
-                diff = abs(true_len - false_len)
-                baseline_diff_true = abs(true_len - baseline_len)
-                baseline_diff_false = abs(false_len - baseline_len)
-
-                # If true and false responses differ by more than 20 chars,
-                # AND baseline matches the true response, it's likely boolean-based SQLi
-                if diff > 20 and baseline_diff_true < diff:
-                    vuln = Vulnerability(
-                        type="SQL Injection (Boolean-based Blind)",
-                        url=url,
-                        parameter=param,
-                        payload=true_payload,
-                        severity="Critical",
-                        description=f"Boolean-based blind SQL Injection in parameter '{param}' — "
-                                    f"true/false conditions produce different responses",
-                        evidence=f"True response length: {true_len}, "
-                                 f"False response length: {false_len}, "
-                                 f"Baseline length: {baseline_len}",
-                        remediation="Use parameterized queries. Input validation. "
-                                    "Consistent error handling regardless of query result.",
-                    )
-                    found.append(vuln)
-                    print(f"{Fore.RED}[!] Boolean SQLi FOUND: {url} | param: {param}")
-                    break
-
-            except Exception:
-                continue
-
-        return found
-
-    def _test_time_based_sqli(self, url: str, param: str) -> List[Vulnerability]:
-        """
-        Test for time-based blind SQLi by measuring response delays.
-        """
-        found = []
-        parsed = urlparse(url)
-        params = parse_qs(parsed.query, keep_blank_values=True)
-
-        if param not in params:
-            return []
-
-        base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-
-        # Time-based payloads
-        time_payloads = [
-            ("' OR SLEEP(5)--", 5, "MySQL"),
-            ("' OR SLEEP(5)#", 5, "MySQL"),
-            ("1' OR SLEEP(5)--", 5, "MySQL"),
-            ("1' AND SLEEP(5)--", 5, "MySQL"),
-            ("'; WAITFOR DELAY '0:0:5'--", 5, "MSSQL"),
-            ("'; WAITFOR DELAY '00:00:05'--", 5, "MSSQL"),
-            ("1'; WAITFOR DELAY '0:0:5'--", 5, "MSSQL"),
-            ("' OR pg_sleep(5)--", 5, "PostgreSQL"),
-            ("1' OR pg_sleep(5)--", 5, "PostgreSQL"),
-            ("' OR pg_sleep(5)::text--", 5, "PostgreSQL"),
-        ]
-
-        # Get baseline timing
-        try:
-            baseline_params = params.copy()
-            baseline_params[param] = [params[param][0]]
-            start = time.time()
-            self.session.get(
-                base_url + "?" + urlencode(baseline_params, doseq=True),
-                timeout=self.timeout + 5
-            )
-            baseline_time = time.time() - start
-        except:
-            baseline_time = 0.5
-
-        print(f"{Fore.CYAN}   [*] Baseline response time: {baseline_time:.2f}s")
-
-        for payload, sleep_seconds, db_type in time_payloads:
-            try:
-                test_params = params.copy()
-                test_params[param] = [payload]
-
-                start = time.time()
-                self.session.get(
-                    base_url + "?" + urlencode(test_params, doseq=True),
-                    timeout=self.timeout + sleep_seconds + 5
-                )
-                elapsed = time.time() - start
-
-                # If response took significantly longer than baseline
-                if elapsed >= baseline_time + sleep_seconds * 0.8:
-                    vuln = Vulnerability(
-                        type=f"SQL Injection (Time-based Blind - {db_type})",
-                        url=url,
-                        parameter=param,
-                        payload=payload,
-                        severity="Critical",
-                        description=f"Time-based blind SQL Injection detected in parameter '{param}' "
-                                    f"({db_type} syntax)",
-                        evidence=f"Response time: {elapsed:.2f}s (baseline: {baseline_time:.2f}s). "
-                                 f"Payload caused {sleep_seconds}s delay.",
-                        remediation="Use parameterized queries. Implement query timeouts. "
-                                    "Avoid dynamic SQL generation.",
-                    )
-                    found.append(vuln)
-                    print(f"{Fore.RED}[!] Time-based SQLi FOUND: {url} | param: {param} | "
-                          f"{db_type} | delay: {elapsed:.2f}s")
-                    break
-
-            except requests.exceptions.Timeout:
-                # Timeout = likely successful time-based injection
-                vuln = Vulnerability(
-                    type=f"SQL Injection (Time-based Blind - {db_type})",
-                    url=url,
-                    parameter=param,
-                    payload=payload,
-                    severity="Critical",
-                    description=f"Time-based blind SQL Injection detected — request timed out "
-                                f"after {self.timeout + sleep_seconds + 5}s",
-                    evidence=f"Request timed out. Payload: {payload}",
-                    remediation="Use parameterized queries. Implement query timeouts.",
-                )
-                found.append(vuln)
-                print(f"{Fore.RED}[!] Time-based SQLi FOUND (timeout): {url} | param: {param}")
-                break
-            except Exception:
-                continue
-
-        return found
-
     def _test_error_based_sqli(self, url: str, param: str) -> List[Vulnerability]:
-        """Test for error-based SQL injection."""
-        found = []
         parsed = urlparse(url)
         params = parse_qs(parsed.query, keep_blank_values=True)
-
         if param not in params:
             return []
-
         base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
         for payload in self.SQLI_PAYLOADS:
@@ -655,66 +505,109 @@ class WebScanner:
                 test_params = params.copy()
                 test_params[param] = [payload]
                 test_url = base_url + "?" + urlencode(test_params, doseq=True)
-
                 response = self.session.get(test_url, timeout=self.timeout)
                 is_error, evidence = self._check_sql_error(response.text)
 
                 if is_error:
                     vuln = Vulnerability(
                         type="SQL Injection (Error-based)",
-                        url=url,
-                        parameter=param,
-                        payload=payload[:80],
+                        url=url, parameter=param, payload=payload[:80],
                         severity="Critical",
-                        description=f"Error-based SQL Injection detected in parameter '{param}'",
+                        description=f"Error-based SQL Injection in parameter '{param}'",
                         evidence=f"SQL Error: {evidence[:300]}",
-                        remediation="Use parameterized queries / prepared statements. "
-                                    "Hide database error details from users.",
+                        remediation="Use parameterized queries / prepared statements.",
                     )
-                    found.append(vuln)
-                    print(f"{Fore.RED}[!] Error SQLi FOUND: {url} | param: {param} | "
-                          f"payload: {payload[:50]}")
-                    break  # One finding per parameter is sufficient
-
+                    print(f"{Fore.RED}[!] Error SQLi FOUND: {url} | param: {param}")
+                    return [vuln]
             except Exception:
                 continue
+        return []
 
-        return found
+    def _test_time_based_sqli_fast(self, url: str, param: str) -> List[Vulnerability]:
+        if self.skip_time_based:
+            return []
+
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        if param not in params:
+            return []
+        base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+        test_payloads = [("' OR SLEEP(3)--", "MySQL")]
+
+        for payload, db_type in test_payloads:
+            try:
+                test_params = params.copy()
+                test_params[param] = [payload]
+
+                baseline_start = time.time()
+                try:
+                    harmless = params.copy()
+                    harmless[param] = ["1"]
+                    self.session.get(
+                        base_url + "?" + urlencode(harmless, doseq=True),
+                        timeout=3
+                    )
+                except:
+                    pass
+                base_time = time.time() - baseline_start
+
+                if base_time > 1.5:
+                    return []
+
+                start = time.time()
+                try:
+                    self.session.get(
+                        base_url + "?" + urlencode(test_params, doseq=True),
+                        timeout=1.5
+                    )
+                    elapsed = time.time() - start
+                except requests.exceptions.Timeout:
+                    vuln = Vulnerability(
+                        type=f"SQL Injection (Time-based Blind - {db_type})",
+                        url=url, parameter=param, payload=payload,
+                        severity="Critical",
+                        description=f"Time-based SQL Injection in parameter '{param}'",
+                        evidence="Request timed out",
+                        remediation="Use parameterized queries.",
+                    )
+                    print(f"{Fore.RED}[!] Time-based SQLi FOUND: {url} | param: {param}")
+                    return [vuln]
+                except Exception:
+                    continue
+
+                if elapsed >= 2.5:
+                    vuln = Vulnerability(
+                        type=f"SQL Injection (Time-based Blind - {db_type})",
+                        url=url, parameter=param, payload=payload,
+                        severity="Critical",
+                        description=f"Time-based SQL Injection in parameter '{param}'",
+                        evidence=f"Response time: {elapsed:.2f}s (baseline: {base_time:.2f}s)",
+                        remediation="Use parameterized queries.",
+                    )
+                    print(f"{Fore.RED}[!] Time-based SQLi FOUND: {url} | param: {param}")
+                    return [vuln]
+            except Exception:
+                continue
+        return []
 
     def _test_sqli_get(self, url: str, param: str) -> List[Vulnerability]:
-        """Comprehensive SQLi test on a GET parameter (all techniques)."""
-        found = []
-
-        # 1. Error-based
-        found.extend(self._test_error_based_sqli(url, param))
+        found = self._test_error_based_sqli(url, param)
         if found:
             return found
-
-        # 2. Boolean-based blind
-        found.extend(self._test_bool_based_sqli(url, param))
-        if found:
-            return found
-
-        # 3. Time-based blind
-        found.extend(self._test_time_based_sqli(url, param))
-
+        found = self._test_time_based_sqli_fast(url, param)
         return found
 
     def _test_sqli_post(self, form: Dict) -> List[Vulnerability]:
-        """Test a form for SQL injection."""
         found = []
-
         for input_field in form["inputs"]:
             param = input_field["name"]
-
-            for payload in self.SQLI_PAYLOADS[:20]:  # Test top 20 payloads on forms
+            for payload in self.SQLI_PAYLOADS[:3]:
                 try:
                     form_data = {}
                     for inp in form["inputs"]:
-                        if inp["name"] == param:
-                            form_data[param] = payload
-                        else:
-                            form_data[inp["name"]] = inp.get("value", "test")
+                        form_data[inp["name"]] = payload if inp["name"] == param else \
+                            inp.get("value", "test")
 
                     if form["method"] == "post":
                         response = self.session.post(
@@ -729,34 +622,26 @@ class WebScanner:
                     if is_error:
                         vuln = Vulnerability(
                             type="SQL Injection (Error-based)",
-                            url=form["url"],
-                            parameter=param,
-                            payload=payload[:80],
+                            url=form["url"], parameter=param, payload=payload[:80],
                             severity="Critical",
-                            description=f"Error-based SQL Injection in form field '{param}' (POST)",
+                            description=f"Error-based SQL Injection in form field '{param}'",
                             evidence=f"SQL Error: {evidence[:300]}",
-                            remediation="Use parameterized queries. Validate all form inputs.",
+                            remediation="Use parameterized queries.",
                         )
                         found.append(vuln)
                         print(f"{Fore.RED}[!] SQLi FOUND (POST): {form['url']} | field: {param}")
                         break
-
                 except Exception:
                     continue
-
         return found
 
     # ==================== XSS DETECTION ====================
 
     def _test_xss_get(self, url: str, param: str) -> List[Vulnerability]:
-        """Test a GET parameter for reflected XSS — improved detection."""
-        found = []
         parsed = urlparse(url)
         params = parse_qs(parsed.query, keep_blank_values=True)
-
         if param not in params:
             return []
-
         base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
         for payload in self.XSS_PAYLOADS:
@@ -764,84 +649,54 @@ class WebScanner:
                 test_params = params.copy()
                 test_params[param] = [payload]
                 test_url = base_url + "?" + urlencode(test_params, doseq=True)
-
                 response = self.session.get(test_url, timeout=self.timeout)
                 resp_text = response.text
 
-                # Check reflection with multiple strategies
-                reflected = False
-                evidence = ""
-
-                # Strategy 1: Exact payload match
                 if payload in resp_text:
-                    reflected = True
-                    evidence = f"Payload exactly reflected: {payload[:100]}"
-
-                # Strategy 2: Case-insensitive match (for script tags)
-                elif payload.lower() in resp_text.lower():
-                    reflected = True
-                    evidence = f"Payload reflected (case-insensitive match): {payload[:100]}"
-
-                # Strategy 3: Check for key XSS signatures
-                # e.g., if we injected `<script>` check for any `<script` in response
-                else:
-                    # Extract key patterns from payload
-                    xss_keywords = ["<script", "onerror=", "onload=", "onfocus=",
-                                    "onclick=", "onmouseover=", "ontoggle=",
-                                    "javascript:", "alert(", "srcdoc=", "autofocus"]
-                    for keyword in xss_keywords:
-                        if keyword in payload and keyword.lower() in resp_text.lower():
-                            reflected = True
-                            evidence = f"XSS signature '{keyword}' reflected in response"
-                            break
-
-                if reflected:
-                    # Make sure it's not HTML-encoded (i.e., actually executable)
-                    # Check for dangerous encoding
-                    dangerous_encoded = [
-                        payload.replace("<", "&lt;"),
-                        payload.replace(">", "&gt;"),
-                    ]
-
-                    is_encoded = all(enc in resp_text for enc in dangerous_encoded if enc != payload)
-
-                    if not is_encoded:
+                    encoded = payload.replace("<", "&lt;").replace(">", "&gt;")
+                    if encoded not in resp_text or payload == encoded:
                         vuln = Vulnerability(
                             type="XSS (Reflected)",
-                            url=url,
-                            parameter=param,
-                            payload=payload[:100],
+                            url=url, parameter=param, payload=payload[:100],
                             severity="High",
-                            description=f"Reflected XSS detected in parameter '{param}'",
-                            evidence=evidence,
-                            remediation="Contextual output encoding. Content-Security-Policy headers. "
-                                        "Input validation with whitelist approach.",
+                            description=f"Reflected XSS in parameter '{param}'",
+                            evidence=f"Payload reflected: {payload[:80]}",
+                            remediation="Contextual output encoding. CSP headers.",
                         )
-                        found.append(vuln)
-                        print(f"{Fore.RED}[!] XSS FOUND: {url} | param: {param} | "
-                              f"payload: {payload[:50]}")
-                        break  # One finding per parameter
+                        print(f"{Fore.RED}[!] XSS FOUND: {url} | param: {param}")
+                        return [vuln]
 
+                for keyword in ["<script", "onerror=", "onload=", "onfocus="]:
+                    if keyword in payload:
+                        idx = resp_text.find(payload[:10])
+                        if idx >= 0:
+                            surrounding = resp_text[max(0, idx-5):idx+len(payload)+5]
+                            if keyword.lower() in surrounding.lower() and \
+                               "&lt;" not in surrounding[:len(keyword)+10]:
+                                vuln = Vulnerability(
+                                    type="XSS (Reflected - Partial)",
+                                    url=url, parameter=param, payload=payload[:100],
+                                    severity="High",
+                                    description=f"Partial reflected XSS in parameter '{param}'",
+                                    evidence=f"Keyword '{keyword}' reflected",
+                                    remediation="Contextual output encoding.",
+                                )
+                                print(f"{Fore.RED}[!] XSS FOUND: {url} | param: {param}")
+                                return [vuln]
             except Exception:
                 continue
-
-        return found
+        return []
 
     def _test_xss_post(self, form: Dict) -> List[Vulnerability]:
-        """Test a form for XSS."""
         found = []
-
         for input_field in form["inputs"]:
             param = input_field["name"]
-
-            for payload in self.XSS_PAYLOADS[:15]:
+            for payload in self.XSS_PAYLOADS[:5]:
                 try:
                     form_data = {}
                     for inp in form["inputs"]:
-                        if inp["name"] == param:
-                            form_data[param] = payload
-                        else:
-                            form_data[inp["name"]] = inp.get("value", "test")
+                        form_data[inp["name"]] = payload if inp["name"] == param else \
+                            inp.get("value", "test")
 
                     if form["method"] == "post":
                         response = self.session.post(
@@ -852,49 +707,33 @@ class WebScanner:
                             form["action_url"], params=form_data, timeout=self.timeout
                         )
 
-                    resp_text = response.text
-
-                    if payload in resp_text or payload.lower() in resp_text.lower():
+                    if payload in response.text:
                         vuln = Vulnerability(
                             type="XSS (Reflected)",
-                            url=form["url"],
-                            parameter=param,
-                            payload=payload[:100],
+                            url=form["url"], parameter=param, payload=payload[:100],
                             severity="High",
-                            description=f"Reflected XSS in form field '{param}' (POST)",
-                            evidence=f"Payload reflected in response",
-                            remediation="Contextual output encoding. Server-side validation. CSP headers.",
+                            description=f"Reflected XSS in form field '{param}'",
+                            evidence="Payload reflected in response",
+                            remediation="Contextual output encoding.",
                         )
                         found.append(vuln)
                         print(f"{Fore.RED}[!] XSS FOUND (POST): {form['url']} | field: {param}")
                         break
-
                 except Exception:
                     continue
-
         return found
 
     # ==================== CSRF DETECTION ====================
 
     def _test_csrf(self, form: Dict) -> List[Vulnerability]:
-        """Detect potential CSRF vulnerabilities."""
         found = []
-
         if form["method"] not in ("post", "put", "delete"):
             return []
 
         has_csrf_token = False
-        csrf_patterns = [
-            "csrf", "csrf_token", "csrftoken", "csrfmiddlewaretoken",
-            "_csrf", "csrf-token", "__csrf", "xsrf", "_xsrf",
-            "authenticity_token", "_token", "token", "nonce",
-            "_request_verification_token", "__RequestVerificationToken",
-            "secret", "_secret",
-        ]
-
         for inp in form["inputs"]:
             name_lower = inp["name"].lower()
-            if any(pattern in name_lower for pattern in csrf_patterns):
+            if any(p in name_lower for p in self.CSRF_PATTERNS):
                 has_csrf_token = True
                 break
 
@@ -905,106 +744,123 @@ class WebScanner:
                 parameter="N/A (form-level)",
                 payload="Cross-Site Request Forgery",
                 severity="Medium",
-                description=f"Potential CSRF vulnerability — no CSRF token in "
-                            f"{form['method'].upper()} form",
-                evidence=f"Form action: {form['action_url']}, "
-                         f"Inputs: {len(form['inputs'])}",
-                remediation="Implement CSRF tokens. Use SameSite cookies. "
-                            "Validate Origin/Referer headers.",
+                description=f"Potential CSRF — no token in {form['method'].upper()} form",
+                evidence=f"Form action: {form.get('action_url', 'N/A')}",
+                remediation="Implement CSRF tokens. Use SameSite cookies.",
             )
             found.append(vuln)
-            print(f"{Fore.YELLOW}[!] CSRF (Potential): {form['url']} | "
-                  f"{form['method'].upper()} form lacks CSRF token")
-
+            print(f"{Fore.YELLOW}[!] CSRF (Potential): {form['url']}")
         return found
 
     # ==================== MAIN SCAN ====================
 
-    def scan(self) -> ScanResult:
-        """Execute full scan: crawl → SQLi → XSS → CSRF."""
-        import datetime
+    def _scan_url_batch(self, urls: List[str]) -> None:
+        """Scan a batch of URLs in parallel."""
+        with ThreadPoolExecutor(max_workers=self.threads) as executor:
+            sqli_futures = []
+            xss_futures = []
 
+            for url in urls:
+                parsed = urlparse(url)
+                params = parse_qs(parsed.query)
+                for param in params:
+                    if param.lower() in self.SKIP_PARAMS:
+                        continue
+                    sqli_futures.append(
+                        executor.submit(self._test_sqli_get, url, param)
+                    )
+                    xss_futures.append(
+                        executor.submit(self._test_xss_get, url, param)
+                    )
+
+            for future in as_completed(sqli_futures + xss_futures):
+                try:
+                    results = future.result()
+                    self.vulnerabilities.extend(results)
+                except Exception:
+                    pass
+
+    def scan(self) -> ScanResult:
         start_time = time.time()
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         print(f"\n{'='*60}")
-        print(f"{Fore.CYAN}  Web Security Scanner — Full Scan")
+        print(f"{Fore.CYAN}  Web Security Scanner — Full Scan with Page Details")
         print(f"{Fore.CYAN}  Target: {self.target_url}")
         print(f"{Fore.CYAN}  Started: {scan_date}")
         print(f"{'='*60}\n")
 
-        # Phase 1: Crawl
-        print(f"{Fore.MAGENTA}[+] Phase 1/4: Automated Crawling{'─'*30}")
+        # Phase 1: Crawl with page details
+        print(f"{Fore.MAGENTA}[+] Phase 1/5: Automated Crawling & Page Analysis")
         self.crawl()
+        
+        # Print page and form summaries
+        self._print_page_summary()
+        self._print_form_summary()
 
-        # Phase 2: SQL Injection
-        print(f"{Fore.MAGENTA}[+] Phase 2/4: SQL Injection Detection{'─'*27}")
-        sqli_count = 0
+        # Phase 2: SQLi + XSS on GET params
+        print(f"\n{Fore.MAGENTA}[+] Phase 2-3/5: SQLi & XSS Detection (GET parameters)")
+        url_list = list(self.visited_urls)
+        self._scan_url_batch(url_list)
 
-        for url in list(self.visited_urls):
-            parsed = urlparse(url)
-            params = parse_qs(parsed.query)
-            for param in params:
-                if param.lower() in ("utm_source", "utm_medium", "utm_campaign", "ref", "source"):
-                    continue  # Skip tracking parameters
-                results = self._test_sqli_get(url, param)
-                self.vulnerabilities.extend(results)
-                sqli_count += len(results)
+        sqli_count = sum(1 for v in self.vulnerabilities if "SQL" in v.type)
+        xss_count = sum(1 for v in self.vulnerabilities if "XSS" in v.type)
+        print(f"{Fore.GREEN}[✓] GET scan complete — SQLi: {sqli_count}, XSS: {xss_count}")
 
+        # Phase 3: SQLi + XSS on POST forms
+        print(f"\n{Fore.MAGENTA}[+] Phase 3b/5: SQLi & XSS Detection (POST forms)")
         for form in self.forms_found:
-            results = self._test_sqli_post(form)
-            self.vulnerabilities.extend(results)
-            sqli_count += len(results)
+            self.vulnerabilities.extend(self._test_sqli_post(form))
+            self.vulnerabilities.extend(self._test_xss_post(form))
 
-        print(f"{Fore.GREEN if sqli_count == 0 else Fore.RED}"
-              f"[✓] SQL Injection checks: {sqli_count} found\n")
-
-        # Phase 3: XSS
-        print(f"{Fore.MAGENTA}[+] Phase 3/4: XSS Detection{'─'*35}")
-
-        xss_count = 0
-        for url in list(self.visited_urls):
-            parsed = urlparse(url)
-            params = parse_qs(parsed.query)
-            for param in params:
-                if param.lower() in ("utm_source", "utm_medium", "utm_campaign", "ref", "source"):
-                    continue
-                results = self._test_xss_get(url, param)
-                self.vulnerabilities.extend(results)
-                xss_count += len(results)
-
-        for form in self.forms_found:
-            results = self._test_xss_post(form)
-            self.vulnerabilities.extend(results)
-            xss_count += len(results)
-
-        print(f"{Fore.GREEN if xss_count == 0 else Fore.RED}"
-              f"[✓] XSS checks: {xss_count} found\n")
+        sqli_count = sum(1 for v in self.vulnerabilities if "SQL" in v.type)
+        xss_count = sum(1 for v in self.vulnerabilities if "XSS" in v.type)
+        print(f"{Fore.GREEN}[✓] POST scan complete — SQLi: {sqli_count}, XSS: {xss_count}")
 
         # Phase 4: CSRF
-        print(f"{Fore.MAGENTA}[+] Phase 4/4: CSRF Testing{'─'*36}")
+        print(f"\n{Fore.MAGENTA}[+] Phase 4/5: CSRF Testing")
         csrf_count = 0
         for form in self.forms_found:
             results = self._test_csrf(form)
             self.vulnerabilities.extend(results)
             csrf_count += len(results)
-
         print(f"{Fore.GREEN if csrf_count == 0 else Fore.YELLOW}"
-              f"[✓] CSRF checks: {csrf_count} potential issues\n")
+              f"[✓] CSRF checks: {csrf_count} potential issues")
+
+        # Phase 5: Generate detailed report
+        print(f"\n{Fore.MAGENTA}[+] Phase 5/5: Generating Detailed Report")
 
         # Summary
         elapsed = time.time() - start_time
+        sqli_count = sum(1 for v in self.vulnerabilities if "SQL" in v.type)
+        xss_count = sum(1 for v in self.vulnerabilities if "XSS" in v.type)
+        csrf_count = sum(1 for v in self.vulnerabilities if "CSRF" in v.type)
+
+        print(f"\n{'='*60}")
+        print(f"{Fore.CYAN}  SCAN COMPLETE — DETAILED REPORT")
         print(f"{'='*60}")
-        print(f"{Fore.CYAN}  SCAN COMPLETE")
-        print(f"{'='*60}")
-        print(f"  Target:              {self.target_url}")
+        print(f"\n{Fore.WHITE}  Target:              {self.target_url}")
+        print(f"  Scan Date:           {scan_date}")
+        print(f"  Duration:            {elapsed:.2f}s")
+        print(f"\n{Fore.CYAN}  ── CRAWL RESULTS ──")
         print(f"  URLs crawled:        {len(self.visited_urls)}")
-        print(f"  Forms analyzed:       {len(self.forms_found)}")
-        print(f"  Total vulnerabilities: {len(self.vulnerabilities)}")
+        print(f"  Pages documented:    {len(self.pages)}")
+        print(f"  Forms found:         {len(self.forms_found)}")
+        print(f"  Form details:        {len(self.form_details)}")
+        print(f"\n{Fore.CYAN}  ── VULNERABILITIES ──")
+        print(f"  Total:               {len(self.vulnerabilities)}")
         print(f"    ├─ SQL Injection:   {sqli_count}")
         print(f"    ├─ XSS:             {xss_count}")
         print(f"    └─ CSRF:            {csrf_count}")
-        print(f"  Duration:            {elapsed:.2f}s")
+        
+        # Print detected technologies
+        all_tech = set()
+        for page in self.pages:
+            all_tech.update(page.tech_stack)
+        if all_tech:
+            print(f"\n{Fore.CYAN}  ── DETECTED TECHNOLOGIES ──")
+            print(f"  {', '.join(sorted(all_tech))}")
+        
         print(f"{'='*60}\n")
 
         result = ScanResult(
@@ -1013,7 +869,189 @@ class WebScanner:
             total_urls_scanned=len(self.visited_urls),
             total_forms_found=len(self.forms_found),
             vulnerabilities=self.vulnerabilities,
+            pages=self.pages,
+            forms=self.form_details,
             scan_duration_seconds=elapsed,
         )
 
         return result
+
+
+# ==================== ADDITIONAL UTILITY FUNCTIONS ====================
+
+def print_vulnerability_details(result: ScanResult) -> None:
+    """Print detailed vulnerability information."""
+    if not result.vulnerabilities:
+        print(f"{Fore.GREEN}[✓] No vulnerabilities found!")
+        return
+    
+    print(f"\n{Fore.RED}[!] Vulnerability Details:")
+    print("=" * 60)
+    
+    for i, vuln in enumerate(result.vulnerabilities, 1):
+        severity_color = {
+            "Critical": Fore.RED,
+            "High": Fore.YELLOW,
+            "Medium": Fore.BLUE,
+            "Low": Fore.WHITE,
+        }.get(vuln.severity, Fore.WHITE)
+        
+        print(f"\n{Fore.WHITE}[{i}] {severity_color}{vuln.type} ({vuln.severity})")
+        print(f"    {Fore.CYAN}URL:       {Fore.WHITE}{vuln.url}")
+        print(f"    {Fore.CYAN}Parameter: {Fore.WHITE}{vuln.parameter}")
+        print(f"    {Fore.CYAN}Payload:   {Fore.WHITE}{vuln.payload}")
+        print(f"    {Fore.CYAN}Evidence:  {Fore.WHITE}{vuln.evidence[:150]}")
+        print(f"    {Fore.CYAN}Fix:       {Fore.WHITE}{vuln.remediation[:100]}")
+
+
+def export_results_to_json(result: ScanResult, filename: str = "scan_results.json") -> None:
+    """Export scan results to JSON file."""
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
+    print(f"{Fore.GREEN}[✓] Results exported to {filename}")
+
+
+def export_results_to_html(result: ScanResult, filename: str = "scan_report.html") -> None:
+    """Export scan results to a readable HTML report."""
+    html = """<!DOCTYPE html>
+<html>
+<head>
+    <title>Web Security Scan Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+        h1, h2, h3 { color: #e94560; }
+        .container { max-width: 1200px; margin: auto; }
+        .page-box { background: #16213e; padding: 15px; margin: 10px 0; border-radius: 5px; }
+        .vuln-critical { border-left: 5px solid #ff0000; padding-left: 10px; }
+        .vuln-high { border-left: 5px solid #ff6600; padding-left: 10px; }
+        .vuln-medium { border-left: 5px solid #ffcc00; padding-left: 10px; }
+        .vuln-low { border-left: 5px solid #00cc00; padding-left: 10px; }
+        table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+        th, td { padding: 8px; text-align: left; border-bottom: 1px solid #333; }
+        th { background: #0f3460; }
+        .badge { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 12px; }
+        .badge-critical { background: #ff0000; }
+        .badge-high { background: #ff6600; }
+        .badge-medium { background: #ffcc00; color: #000; }
+        .badge-low { background: #00cc00; color: #000; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Web Security Scan Report</h1>
+        <p>Target: <strong>%s</strong></p>
+        <p>Date: %s</p>
+        <p>Duration: %.2f seconds</p>
+        
+        <h2>Summary</h2>
+        <table>
+            <tr><th>Metric</th><th>Value</th></tr>
+            <tr><td>URLs Scanned</td><td>%d</td></tr>
+            <tr><td>Forms Found</td><td>%d</td></tr>
+            <tr><td>Total Vulnerabilities</td><td>%d</td></tr>
+            <tr><td>SQL Injection</td><td>%d</td></tr>
+            <tr><td>XSS</td><td>%d</td></tr>
+            <tr><td>CSRF</td><td>%d</td></tr>
+        </table>
+        
+        <h2>Discovered Pages</h2>
+        <div class="page-box">
+            <table>
+                <tr><th>#</th><th>URL</th><th>Title</th><th>Status</th><th>Forms</th><th>Tech</th></tr>
+    """
+    
+    sqli_count = sum(1 for v in result.vulnerabilities if "SQL" in v.type)
+    xss_count = sum(1 for v in result.vulnerabilities if "XSS" in v.type)
+    csrf_count = sum(1 for v in result.vulnerabilities if "CSRF" in v.type)
+    
+    html = html % (
+        result.target_url,
+        result.scan_date,
+        result.scan_duration_seconds,
+        result.total_urls_scanned,
+        result.total_forms_found,
+        len(result.vulnerabilities),
+        sqli_count, xss_count, csrf_count
+    )
+    
+    for i, page in enumerate(result.pages, 1):
+        tech = ", ".join(page.tech_stack) if page.tech_stack else "N/A"
+        html += f"""<tr><td>{i}</td><td><a href="{page.url}" style="color: #4fc3f7;">{page.url[:60]}</a></td>
+                    <td>{page.title[:50]}</td><td>{page.status_code}</td>
+                    <td>{len(page.forms)}</td><td>{tech}</td></tr>"""
+    
+    html += """</table></div>
+        <h2>Vulnerabilities</h2>
+    """
+    
+    if not result.vulnerabilities:
+        html += "<p style='color: #00cc00;'>No vulnerabilities found.</p>"
+    else:
+        for vuln in result.vulnerabilities:
+            vuln_class = f"vuln-{vuln.severity.lower()}"
+            html += f"""<div class="{vuln_class}">
+                <h3>{vuln.type} <span class="badge badge-{vuln.severity.lower()}">{vuln.severity}</span></h3>
+                <p><strong>URL:</strong> {vuln.url}</p>
+                <p><strong>Parameter:</strong> {vuln.parameter}</p>
+                <p><strong>Payload:</strong> <code>{vuln.payload}</code></p>
+                <p><strong>Evidence:</strong> {vuln.evidence}</p>
+                <p><strong>Remediation:</strong> {vuln.remediation}</p>
+            </div>"""
+    
+    html += """</div></body></html>"""
+    
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"{Fore.GREEN}[✓] HTML report exported to {filename}")
+
+
+# ==================== USAGE EXAMPLES ====================
+
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) < 2:
+        print(f"{Fore.YELLOW}Usage: python scanner.py <target_url> [options]")
+        print(f"{Fore.YELLOW}Options:")
+        print(f"  --skip-time    Skip time-based SQLi tests")
+        print(f"  --depth N      Set crawl depth (default: 2)")
+        print(f"  --threads N    Set thread count (default: 10)")
+        print(f"  --json FILE    Export results to JSON")
+        print(f"  --html FILE    Export results to HTML")
+        sys.exit(1)
+    
+    target_url = sys.argv[1]
+    skip_time = "--skip-time" in sys.argv
+    depth = 2
+    threads = 10
+    json_file = None
+    html_file = None
+    
+    for i, arg in enumerate(sys.argv):
+        if arg == "--depth" and i + 1 < len(sys.argv):
+            depth = int(sys.argv[i + 1])
+        elif arg == "--threads" and i + 1 < len(sys.argv):
+            threads = int(sys.argv[i + 1])
+        elif arg == "--json" and i + 1 < len(sys.argv):
+            json_file = sys.argv[i + 1]
+        elif arg == "--html" and i + 1 < len(sys.argv):
+            html_file = sys.argv[i + 1]
+    
+    scanner = WebScanner(
+        target_url=target_url,
+        max_depth=depth,
+        threads=threads,
+        skip_time_based=skip_time,
+    )
+    
+    result = scanner.scan()
+    
+    # Print vulnerability details
+    print_vulnerability_details(result)
+    
+    # Export if requested
+    if json_file:
+        export_results_to_json(result, json_file)
+    
+    if html_file:
+        export_results_to_html(result, html_file)
